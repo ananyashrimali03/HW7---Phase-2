@@ -40,6 +40,8 @@ import pygame
 import sys
 import math
 import random
+import json
+import os
 
 pygame.init()
 
@@ -74,6 +76,54 @@ pygame.display.set_caption("Fireboy & Watergirl")
 clock      = pygame.time.Clock()
 font_big   = pygame.font.SysFont("Arial", 28, bold=True)
 font_small = pygame.font.SysFont("Arial", 18)
+font_title = pygame.font.SysFont("Arial", 52, bold=True)
+font_menu  = pygame.font.SysFont("Arial", 24, bold=True)
+
+
+# ── Leaderboard persistence ────────────────────────────────────────────────────
+
+SCORES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "best_times.json")
+MAX_RECORDS = 10
+
+
+def _rank_key(record):
+    """Sort key: highest score first, fastest time breaks ties."""
+    return (-record["score"], record["time"])
+
+
+def load_records():
+    """Load the ranked list of {score, time} records from disk."""
+    if os.path.exists(SCORES_FILE):
+        try:
+            with open(SCORES_FILE, "r") as f:
+                data = json.load(f)
+            if data and isinstance(data[0], (int, float)):
+                data = [{"score": 0, "time": t} for t in data]
+            return sorted(data, key=_rank_key)[:MAX_RECORDS]
+        except (json.JSONDecodeError, TypeError, KeyError):
+            return []
+    return []
+
+
+def save_records(records):
+    """Write the ranked records list to disk."""
+    with open(SCORES_FILE, "w") as f:
+        json.dump(sorted(records, key=_rank_key)[:MAX_RECORDS], f)
+
+
+def is_new_high(score, time, records):
+    """True if this run would rank #1 overall."""
+    if not records:
+        return True
+    best = records[0]
+    return score > best["score"] or (score == best["score"] and time < best["time"])
+
+
+def format_time(seconds):
+    """Format a float seconds value as M:SS.d  (e.g. 1:04.3)."""
+    mins = int(seconds) // 60
+    secs = seconds - mins * 60
+    return f"{mins}:{secs:04.1f}"
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -601,7 +651,7 @@ class Character:
             if not j.collected and self.rect.colliderect(j.rect):
                 if self._can_collect(j):
                     j.collected = True
-                    self.score += 1
+                    self.score += 2 if j.kind == "green" else 1
 
     def _can_collect(self, jewel):
         """
@@ -664,13 +714,17 @@ class Fireboy(Character):
       - Can collect fire jewels and green (neutral) jewels.
       - Is immune to lava — he can walk over lava platforms safely.
 
-    Visual design: flame-shaped hair animated with sine waves,
-    warm orange body, golden eyes with an orange iris glow.
+    Visual design: a flame-shaped body (teardrop pointing up) that IS
+    the character, with two big yellow eyes, a smile, and tiny stub
+    arms/legs — matching the original Fireboy & Watergirl art style.
     """
 
-    BODY_COLOR   = (210, 50, 10)
-    DARK_COLOR   = (140, 20, 0)
-    FLAME_COLORS = [(255, 220, 50), (255, 130, 20), (210, 50, 10)]
+    BODY_FILL    = (240, 80, 15)
+    BODY_LIGHT   = (255, 140, 40)
+    OUTLINE      = (40, 10, 0)
+    EYE_FILL     = (255, 230, 30)
+    EYE_OUTLINE  = (80, 60, 0)
+    LIMB_COLOR   = (210, 50, 10)
 
     def _on_hazard(self, platform):
         """Fireboy dies when touching a water platform."""
@@ -683,62 +737,88 @@ class Fireboy(Character):
 
     def draw(self, surf):
         cx = int(self.x) + self.W // 2
-        cy = int(self.y) + self.H // 2
+        top = int(self.y)
+        body_cx = cx
+        body_cy = top + 18
+        body_rx = 14
+        body_ry = 13
 
-        # ── Flame hair ───────────────────────────────────────────────────────
-        # Three flame tongues offset by 1.2 radians; height and offset driven
-        # by a sine wave so they dance independently.
-        for i in range(3):
-            offset = math.sin(self.tick * 0.18 + i * 1.2) * 4
-            fh = 10 + i * 3
-            fc = self.FLAME_COLORS[i]
-            pts = [
-                (cx + (i - 1) * 7,              cy - self.H // 2 + 4),
-                (cx + (i - 1) * 7 - 4 * self.facing, cy - self.H // 2 - fh + offset),
-                (cx + (i - 1) * 7 + 4 * self.facing, cy - self.H // 2 - fh + offset + 3),
-            ]
-            pygame.draw.polygon(surf, fc, pts)
+        # ── Flame-shaped body ────────────────────────────────────────────────
+        # Built from an ellipse (lower face area) + flame tips on top
+        flame_tips = []
+        tip_data = [(-8, -18), (-3, -25), (2, -22), (7, -27), (11, -17)]
+        for i, (ox, base_h) in enumerate(tip_data):
+            flicker = math.sin(self.tick * 0.18 + i * 1.3) * 3
+            flame_tips.append((body_cx + ox, body_cy + base_h + int(flicker)))
 
-        # ── Body ─────────────────────────────────────────────────────────────
-        body_rect = pygame.Rect(int(self.x) + 2, int(self.y) + 8, self.W - 4, self.H - 14)
-        draw_rounded_rect(surf, self.DARK_COLOR, body_rect.inflate(4, 2), 10)  # shadow
-        draw_rounded_rect(surf, self.BODY_COLOR, body_rect, 10)
+        body_outline = []
+        steps = 16
+        for i in range(steps + 1):
+            angle = math.pi + (math.pi * i / steps)
+            bx = body_cx + int(math.cos(angle) * (body_rx + 2))
+            by = body_cy + int(math.sin(angle) * (body_ry + 1))
+            body_outline.append((bx, by))
 
-        # ── Legs ─────────────────────────────────────────────────────────────
-        # foot_offset alternates between the two legs using a phase offset of 2
-        leg_y = int(self.y) + self.H - 10
+        full_shape = [body_outline[0]] + flame_tips + [body_outline[-1]] + list(reversed(body_outline))
+
+        pygame.draw.polygon(surf, self.OUTLINE, full_shape)
+
+        inner_tips = []
+        for i, (ox, base_h) in enumerate(tip_data):
+            flicker = math.sin(self.tick * 0.18 + i * 1.3) * 3
+            inner_tips.append((body_cx + ox, body_cy + base_h + 3 + int(flicker)))
+
+        inner_outline = []
+        for i in range(steps + 1):
+            angle = math.pi + (math.pi * i / steps)
+            bx = body_cx + int(math.cos(angle) * body_rx)
+            by = body_cy + int(math.sin(angle) * body_ry)
+            inner_outline.append((bx, by))
+
+        inner_shape = [inner_outline[0]] + inner_tips + [inner_outline[-1]] + list(reversed(inner_outline))
+        pygame.draw.polygon(surf, self.BODY_FILL, inner_shape)
+
+        highlight_rect = pygame.Rect(body_cx - body_rx + 4, body_cy - 6, body_rx, body_ry)
+        hl_surf = pygame.Surface((highlight_rect.w, highlight_rect.h), pygame.SRCALPHA)
+        pygame.draw.ellipse(hl_surf, (*self.BODY_LIGHT, 90),
+                            (0, 0, highlight_rect.w, highlight_rect.h))
+        surf.blit(hl_surf, highlight_rect.topleft)
+
+        # ── Eyes (two big yellow circles) ────────────────────────────────────
         for side in (-1, 1):
-            foot_offset = (
-                int(math.sin((self.walk_frame + side * 2) * math.pi / 2) * 5)
-                if abs(self.vx) > 0.1 else 0
-            )
-            pygame.draw.line(surf, self.DARK_COLOR,
-                             (cx + side * 5, leg_y),
-                             (cx + side * 7, leg_y + 8 + foot_offset), 5)
+            ex = body_cx + side * 6
+            ey = body_cy + 1
+            pygame.draw.circle(surf, self.OUTLINE, (ex, ey), 6)
+            pygame.draw.circle(surf, self.EYE_FILL, (ex, ey), 5)
+            pygame.draw.circle(surf, (0, 0, 0),
+                               (ex + self.facing * 2, ey), 2)
 
-        # ── Arms ─────────────────────────────────────────────────────────────
-        # Counter-swing: left arm forward when right leg is forward
-        arm_swing = int(math.sin(self.walk_frame * math.pi / 2) * 6) if abs(self.vx) > 0.1 else 0
-        pygame.draw.line(surf, self.DARK_COLOR,
-                         (cx - 8, int(self.y) + 14),
-                         (cx - 14, int(self.y) + 22 + arm_swing), 4)
-        pygame.draw.line(surf, self.DARK_COLOR,
-                         (cx + 8, int(self.y) + 14),
-                         (cx + 14, int(self.y) + 22 - arm_swing), 4)
+        # ── Mouth (simple smile) ─────────────────────────────────────────────
+        pygame.draw.arc(surf, self.OUTLINE,
+                        pygame.Rect(body_cx - 5, body_cy + 5, 10, 6),
+                        math.pi + 0.4, 2 * math.pi - 0.4, 2)
 
-        # ── Eye ──────────────────────────────────────────────────────────────
-        # Eye position shifts left/right with self.facing so it always looks
-        # in the direction of movement.
-        eye_x = cx + self.facing * 5
-        pygame.draw.circle(surf, (255, 255, 255), (eye_x, int(self.y) + 16), 5)
-        pygame.draw.circle(surf, (255, 200, 50),  (eye_x, int(self.y) + 16), 3)
-        pygame.draw.circle(surf, (0, 0, 0),        (eye_x + self.facing, int(self.y) + 16), 2)
+        # ── Tiny stub arms ───────────────────────────────────────────────────
+        arm_swing = (int(math.sin(self.walk_frame * math.pi / 2) * 4)
+                     if abs(self.vx) > 0.1 else 0)
+        for side, sw in [(-1, 1), (1, -1)]:
+            ax = body_cx + side * (body_rx + 1)
+            ay = body_cy + 6
+            pygame.draw.line(surf, self.LIMB_COLOR,
+                             (ax, ay), (ax + side * 6, ay + 4 + sw * arm_swing), 4)
+            pygame.draw.circle(surf, self.LIMB_COLOR,
+                               (ax + side * 6, ay + 4 + sw * arm_swing), 3)
 
-        # ── Ambient glow aura ─────────────────────────────────────────────────
-        aura  = pygame.Surface((60, 70), pygame.SRCALPHA)
-        pulse = int(30 + 15 * math.sin(self.tick * 0.12))
-        pygame.draw.ellipse(aura, (255, 80, 20, pulse), (5, 5, 50, 60))
-        surf.blit(aura, (cx - 30, cy - 35))
+        # ── Tiny stub legs ───────────────────────────────────────────────────
+        for side in (-1, 1):
+            foot_swing = (int(math.sin((self.walk_frame + side * 2) * math.pi / 2) * 5)
+                          if abs(self.vx) > 0.1 else 0)
+            lx = body_cx + side * 5
+            ly = body_cy + body_ry
+            pygame.draw.line(surf, self.LIMB_COLOR,
+                             (lx, ly), (lx + foot_swing // 2, ly + 10 + foot_swing), 4)
+            pygame.draw.circle(surf, self.LIMB_COLOR,
+                               (lx + foot_swing // 2, ly + 10 + foot_swing), 3)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -754,13 +834,19 @@ class Watergirl(Character):
       - Can collect water jewels and green (neutral) jewels.
       - Is immune to water — she can walk through water platforms safely.
 
-    Visual design: droplet-shaped hair with a ripple arc across the torso,
-    cool blue palette, soft cyan iris.
+    Visual design: a large round blue bubble that IS the character, with
+    a water-bun on top, two big eyes with half-lid highlights, a smile,
+    animated swirl patterns, and tiny stub arms/legs — matching the
+    original Fireboy & Watergirl art style.
     """
 
-    BODY_COLOR   = (30, 100, 220)
-    DARK_COLOR   = (15, 60, 160)
-    DROPLET_COLS = [(180, 230, 255), (80, 180, 255), (30, 100, 220)]
+    BODY_FILL    = (80, 180, 255)
+    BODY_DARK    = (40, 130, 220)
+    OUTLINE      = (10, 40, 100)
+    SWIRL_COLOR  = (50, 150, 240)
+    BUN_COLOR    = (100, 200, 255)
+    BUN_DARK     = (60, 160, 230)
+    LIMB_COLOR   = (60, 160, 255)
 
     def _on_hazard(self, platform):
         """Watergirl dies when touching a lava platform."""
@@ -773,62 +859,86 @@ class Watergirl(Character):
 
     def draw(self, surf):
         cx = int(self.x) + self.W // 2
-        cy = int(self.y) + self.H // 2
+        top = int(self.y)
+        body_cx = cx
+        body_cy = top + 16
+        body_r = 15
 
-        # ── Droplet hair ──────────────────────────────────────────────────────
+        # ── Water bun / ponytail on top ──────────────────────────────────────
+        bun_cx = body_cx + 2
+        bun_cy = body_cy - body_r - 4
+        wobble = math.sin(self.tick * 0.1) * 2
+        pygame.draw.circle(surf, self.OUTLINE, (bun_cx, bun_cy + int(wobble)), 10)
+        pygame.draw.circle(surf, self.BUN_COLOR, (bun_cx, bun_cy + int(wobble)), 8)
+        pygame.draw.circle(surf, self.BUN_DARK,
+                           (bun_cx - 2, bun_cy - 2 + int(wobble)), 4)
+        pygame.draw.circle(surf, (140, 220, 255),
+                           (bun_cx + 3, bun_cy + 2 + int(wobble)), 3)
+        pygame.draw.line(surf, self.OUTLINE,
+                         (bun_cx, bun_cy + 8 + int(wobble)),
+                         (body_cx, body_cy - body_r + 2), 3)
+
+        # ── Round body (big blue circle) ─────────────────────────────────────
+        pygame.draw.circle(surf, self.OUTLINE, (body_cx, body_cy), body_r + 2)
+        pygame.draw.circle(surf, self.BODY_FILL, (body_cx, body_cy), body_r)
+
+        # Animated swirl/wave patterns inside the body
+        swirl_angle = self.tick * 0.04
         for i in range(3):
-            offset = math.sin(self.tick * 0.14 + i * 1.0) * 3
-            dh = 9 + i * 2
-            dc = self.DROPLET_COLS[i]
-            dx = cx + (i - 1) * 7
-            dy = int(self.y) - 2 + int(offset)
-            # Teardrop = triangle tip + circle base
-            pts = [(dx, dy), (dx - 4, dy - dh), (dx + 4, dy - dh)]
-            pygame.draw.polygon(surf, dc, pts)
-            pygame.draw.circle(surf, dc, (dx, dy), 4)
+            sa = swirl_angle + i * 2.1
+            sx = body_cx + int(math.cos(sa) * 6)
+            sy = body_cy + int(math.sin(sa) * 5) - 2
+            sw_surf = pygame.Surface((12, 8), pygame.SRCALPHA)
+            pygame.draw.arc(sw_surf, (*self.SWIRL_COLOR, 120),
+                            (0, 0, 12, 8), 0.3, math.pi - 0.3, 2)
+            surf.blit(sw_surf, (sx - 6, sy - 4))
 
-        # ── Body ──────────────────────────────────────────────────────────────
-        body_rect = pygame.Rect(int(self.x) + 2, int(self.y) + 8, self.W - 4, self.H - 14)
-        draw_rounded_rect(surf, self.DARK_COLOR, body_rect.inflate(4, 2), 10)
-        draw_rounded_rect(surf, self.BODY_COLOR, body_rect, 10)
+        hl_surf = pygame.Surface((14, 14), pygame.SRCALPHA)
+        pygame.draw.circle(hl_surf, (180, 230, 255, 80), (7, 7), 7)
+        surf.blit(hl_surf, (body_cx - body_r + 3, body_cy - body_r + 4))
 
-        # Ripple arc — animated vertically with a sine, suggesting flowing water
-        ripple_y = int(self.y) + 18 + int(math.sin(self.tick * 0.1) * 2)
-        pygame.draw.arc(surf, (100, 180, 255),
-                        pygame.Rect(int(self.x) + 6, ripple_y, self.W - 12, 8),
-                        0, math.pi, 2)
-
-        # ── Legs ──────────────────────────────────────────────────────────────
-        leg_y = int(self.y) + self.H - 10
+        # ── Eyes (two big eyes with half-lid look) ───────────────────────────
         for side in (-1, 1):
-            foot_offset = (
-                int(math.sin((self.walk_frame + side * 2) * math.pi / 2) * 5)
-                if abs(self.vx) > 0.1 else 0
-            )
-            pygame.draw.line(surf, self.DARK_COLOR,
-                             (cx + side * 5, leg_y),
-                             (cx + side * 7, leg_y + 8 + foot_offset), 5)
+            ex = body_cx + side * 6
+            ey = body_cy - 1
+            pygame.draw.circle(surf, (255, 255, 255), (ex, ey), 5)
+            pygame.draw.circle(surf, self.OUTLINE, (ex, ey), 5, 1)
+            pupil_x = ex + self.facing * 2
+            pygame.draw.circle(surf, (0, 0, 0), (pupil_x, ey + 1), 2)
+            lid_pts = [
+                (ex - 5, ey - 2),
+                (ex, ey - 5),
+                (ex + 5, ey - 2),
+            ]
+            pygame.draw.polygon(surf, self.BODY_FILL, lid_pts)
+            pygame.draw.lines(surf, self.OUTLINE, False, lid_pts, 1)
 
-        # ── Arms ──────────────────────────────────────────────────────────────
-        arm_swing = int(math.sin(self.walk_frame * math.pi / 2) * 6) if abs(self.vx) > 0.1 else 0
-        pygame.draw.line(surf, self.DARK_COLOR,
-                         (cx - 8, int(self.y) + 14),
-                         (cx - 14, int(self.y) + 22 + arm_swing), 4)
-        pygame.draw.line(surf, self.DARK_COLOR,
-                         (cx + 8, int(self.y) + 14),
-                         (cx + 14, int(self.y) + 22 - arm_swing), 4)
+        # ── Mouth (simple smile) ─────────────────────────────────────────────
+        pygame.draw.arc(surf, self.OUTLINE,
+                        pygame.Rect(body_cx - 5, body_cy + 5, 10, 6),
+                        math.pi + 0.4, 2 * math.pi - 0.4, 2)
 
-        # ── Eye ───────────────────────────────────────────────────────────────
-        eye_x = cx + self.facing * 5
-        pygame.draw.circle(surf, (220, 240, 255), (eye_x, int(self.y) + 16), 5)
-        pygame.draw.circle(surf, (100, 200, 255), (eye_x, int(self.y) + 16), 3)
-        pygame.draw.circle(surf, (0, 0, 0),        (eye_x + self.facing, int(self.y) + 16), 2)
+        # ── Tiny stub arms ───────────────────────────────────────────────────
+        arm_swing = (int(math.sin(self.walk_frame * math.pi / 2) * 4)
+                     if abs(self.vx) > 0.1 else 0)
+        for side, sw in [(-1, 1), (1, -1)]:
+            ax = body_cx + side * (body_r + 1)
+            ay = body_cy + 6
+            pygame.draw.line(surf, self.LIMB_COLOR,
+                             (ax, ay), (ax + side * 6, ay + 4 + sw * arm_swing), 4)
+            pygame.draw.circle(surf, self.LIMB_COLOR,
+                               (ax + side * 6, ay + 4 + sw * arm_swing), 3)
 
-        # ── Ambient glow aura ─────────────────────────────────────────────────
-        aura  = pygame.Surface((60, 70), pygame.SRCALPHA)
-        pulse = int(30 + 15 * math.sin(self.tick * 0.10 + 1.5))
-        pygame.draw.ellipse(aura, (50, 150, 255, pulse), (5, 5, 50, 60))
-        surf.blit(aura, (cx - 30, cy - 35))
+        # ── Tiny stub legs ───────────────────────────────────────────────────
+        for side in (-1, 1):
+            foot_swing = (int(math.sin((self.walk_frame + side * 2) * math.pi / 2) * 5)
+                          if abs(self.vx) > 0.1 else 0)
+            lx = body_cx + side * 5
+            ly = body_cy + body_r
+            pygame.draw.line(surf, self.LIMB_COLOR,
+                             (lx, ly), (lx + foot_swing // 2, ly + 10 + foot_swing), 4)
+            pygame.draw.circle(surf, self.LIMB_COLOR,
+                               (lx + foot_swing // 2, ly + 10 + foot_swing), 3)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -883,10 +993,6 @@ def build_level():
         # which check_hazards() now catches correctly.
         Platform(200, 560, 140, 20, "lava"),   # lava pool — kills Watergirl
         Platform(560, 560, 140, 20, "water"),  # water pool — kills Fireboy
-
-        # ── Elevated hazard ledges ───────────────────────────────────────
-        Platform(310, 460, 80, 14, "lava"),
-        Platform(510, 390, 80, 14, "water"),
     ]
 
     jewels = [
@@ -918,16 +1024,23 @@ def build_level():
 # HUD AND OVERLAY SCREENS
 # ══════════════════════════════════════════════════════════════════════════════
 
-def draw_hud(surf, fireboy, watergirl):
+def draw_hud(surf, fireboy, watergirl, elapsed):
     """
-    Render the score counters and control reminder in the corners.
-    Kept as a free function rather than a class because it owns no state —
-    it just reads from the character objects each frame.
+    Render diamond scores, live timer, and control reminder.
     """
+    total = fireboy.score + watergirl.score
     fb_surf = font_small.render(f"Fireboy: {fireboy.score}",    True, (255, 140, 40))
     wg_surf = font_small.render(f"Watergirl: {watergirl.score}", True, (80, 180, 255))
+    tot_surf = font_small.render(f"Total: {total} pts", True, (180, 255, 140))
     surf.blit(fb_surf, (10, 10))
     surf.blit(wg_surf, (10, 34))
+    surf.blit(tot_surf, (10, 58))
+
+    timer_txt = font_big.render(format_time(elapsed), True, (255, 255, 255))
+    surf.blit(timer_txt, (WIDTH // 2 - timer_txt.get_width() // 2, 8))
+
+    green_hint = font_small.render("Green = 2x pts", True, (100, 220, 130))
+    surf.blit(green_hint, (WIDTH // 2 - green_hint.get_width() // 2, 38))
 
     ctrl1 = font_small.render("Fireboy: LEFT RIGHT UP",   True, (180, 100, 60))
     ctrl2 = font_small.render("Watergirl: A D W",         True, (60,  130, 200))
@@ -945,15 +1058,306 @@ def draw_death_screen(surf, who):
     surf.blit(txt, (WIDTH // 2 - txt.get_width() // 2, HEIGHT // 2 - 20))
 
 
-def draw_win_screen(surf):
+def draw_win_screen(surf, score, elapsed, records, new_high):
     """Overlay shown when both characters reach their doors."""
     overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
-    overlay.fill((0, 0, 0, 160))
+    overlay.fill((0, 0, 0, 180))
     surf.blit(overlay, (0, 0))
-    txt = font_big.render(
-        "Level Complete!  Press R to restart", True, (255, 220, 80)
-    )
-    surf.blit(txt, (WIDTH // 2 - txt.get_width() // 2, HEIGHT // 2 - 20))
+
+    txt = font_title.render("Level Complete!", True, (255, 220, 80))
+    surf.blit(txt, (WIDTH // 2 - txt.get_width() // 2, 60))
+
+    score_txt = font_big.render(f"Diamonds: {score} pts", True, (180, 255, 140))
+    surf.blit(score_txt, (WIDTH // 2 - score_txt.get_width() // 2, 125))
+
+    time_txt = font_big.render(f"Time: {format_time(elapsed)}", True, (255, 255, 255))
+    surf.blit(time_txt, (WIDTH // 2 - time_txt.get_width() // 2, 160))
+
+    if new_high:
+        nb = font_menu.render("NEW HIGH SCORE!", True, (255, 220, 50))
+        surf.blit(nb, (WIDTH // 2 - nb.get_width() // 2, 200))
+
+    hdr = font_menu.render("Leaderboard", True, (255, 200, 100))
+    surf.blit(hdr, (WIDTH // 2 - hdr.get_width() // 2, 235))
+
+    col_hdr = font_small.render("  #     SCORE       TIME", True, (160, 155, 145))
+    surf.blit(col_hdr, (WIDTH // 2 - 100, 262))
+
+    for i, rec in enumerate(records[:7]):
+        rank_color = ((255, 215, 0) if i == 0
+                      else (200, 200, 210) if i == 1
+                      else (180, 120, 60) if i == 2
+                      else (180, 175, 165))
+        row = font_small.render(
+            f"#{i + 1:>2}      {rec['score']:>3} pts     {format_time(rec['time'])}",
+            True, rank_color)
+        surf.blit(row, (WIDTH // 2 - 100, 286 + i * 24))
+
+    restart = font_small.render("Press R to play again", True, (180, 175, 165))
+    surf.blit(restart, (WIDTH // 2 - restart.get_width() // 2, HEIGHT - 50))
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# MENU BUTTON
+# ══════════════════════════════════════════════════════════════════════════════
+
+class Button:
+    """A clickable rectangle with text, hover highlight, and rounded corners."""
+
+    def __init__(self, x, y, w, h, text, color, hover_color, text_color=(255, 255, 255)):
+        self.rect        = pygame.Rect(x, y, w, h)
+        self.text        = text
+        self.color       = color
+        self.hover_color = hover_color
+        self.text_color  = text_color
+        self.hovered     = False
+
+    def update(self, mouse_pos):
+        self.hovered = self.rect.collidepoint(mouse_pos)
+
+    def draw(self, surf):
+        col = self.hover_color if self.hovered else self.color
+        draw_rounded_rect(surf, (0, 0, 0), self.rect.inflate(4, 4), 12)
+        draw_rounded_rect(surf, col, self.rect, 10)
+        if self.hovered:
+            glow = pygame.Surface((self.rect.w + 16, self.rect.h + 16), pygame.SRCALPHA)
+            pygame.draw.rect(glow, (*col, 40), (0, 0, glow.get_width(), glow.get_height()),
+                             border_radius=14)
+            surf.blit(glow, (self.rect.x - 8, self.rect.y - 8))
+        txt = font_menu.render(self.text, True, self.text_color)
+        surf.blit(txt, (self.rect.centerx - txt.get_width() // 2,
+                        self.rect.centery - txt.get_height() // 2))
+
+    def clicked(self, event):
+        return (event.type == pygame.MOUSEBUTTONDOWN
+                and event.button == 1
+                and self.hovered)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# START SCREEN & INSTRUCTIONS SCREEN
+# ══════════════════════════════════════════════════════════════════════════════
+
+def start_screen():
+    """
+    Title screen shown when the game launches.
+    Returns when the player clicks Play; clicking Instructions opens that page.
+    """
+    bg = Background()
+
+    btn_w, btn_h = 220, 50
+    play_btn = Button(WIDTH // 2 - btn_w // 2, 330, btn_w, btn_h,
+                      "Play", (200, 60, 20), (255, 100, 40))
+    instr_btn = Button(WIDTH // 2 - btn_w // 2, 395, btn_w, btn_h,
+                       "Instructions", (30, 90, 200), (60, 140, 255))
+    times_btn = Button(WIDTH // 2 - btn_w // 2, 460, btn_w, btn_h,
+                       "Best Times", (120, 90, 20), (180, 140, 40))
+
+    tick = 0
+    while True:
+        clock.tick(FPS)
+        tick += 1
+        mouse = pygame.mouse.get_pos()
+
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                pygame.quit()
+                sys.exit()
+            if play_btn.clicked(event):
+                return
+            if instr_btn.clicked(event):
+                instructions_screen()
+            if times_btn.clicked(event):
+                best_times_screen()
+
+        play_btn.update(mouse)
+        instr_btn.update(mouse)
+        times_btn.update(mouse)
+        bg.update()
+
+        bg.draw(screen)
+
+        # Title text with a gentle vertical bob
+        bob = math.sin(tick * 0.04) * 4
+        title1 = font_title.render("Fireboy", True, (255, 140, 40))
+        title2 = font_title.render("&", True, (200, 200, 200))
+        title3 = font_title.render("Watergirl", True, (80, 180, 255))
+        total_w = title1.get_width() + title2.get_width() + title3.get_width() + 20
+        tx = WIDTH // 2 - total_w // 2
+        ty = 120 + int(bob)
+        screen.blit(title1, (tx, ty))
+        tx += title1.get_width() + 10
+        screen.blit(title2, (tx, ty))
+        tx += title2.get_width() + 10
+        screen.blit(title3, (tx, ty))
+
+        subtitle = font_small.render("A two-player co-operative platformer", True, (180, 170, 160))
+        screen.blit(subtitle, (WIDTH // 2 - subtitle.get_width() // 2, 190 + int(bob)))
+
+        # Draw small preview characters on the title screen
+        fire_preview_x = WIDTH // 2 - 60
+        water_preview_x = WIDTH // 2 + 40
+        preview_y = 240
+        _draw_mini_fireboy(screen, fire_preview_x, preview_y + int(bob), tick)
+        _draw_mini_watergirl(screen, water_preview_x, preview_y + int(bob), tick)
+
+        play_btn.draw(screen)
+        instr_btn.draw(screen)
+        times_btn.draw(screen)
+
+        hint = font_small.render("Press ESC to quit anytime", True, (120, 110, 100))
+        screen.blit(hint, (WIDTH // 2 - hint.get_width() // 2, HEIGHT - 40))
+
+        pygame.display.flip()
+
+
+def _draw_mini_fireboy(surf, x, y, tick):
+    """Small Fireboy preview for the title screen."""
+    cx, cy = x + 14, y + 14
+    for i in range(3):
+        flicker = math.sin(tick * 0.2 + i * 1.3) * 2
+        fx = cx + (i - 1) * 4
+        pts = [(fx - 2, cy - 8), (fx, cy - 16 + int(flicker)), (fx + 2, cy - 8)]
+        pygame.draw.polygon(surf, (255, 160 + i * 30, 20), pts)
+    pygame.draw.circle(surf, (40, 10, 0), (cx, cy), 11)
+    pygame.draw.circle(surf, (240, 80, 15), (cx, cy), 9)
+    for side in (-1, 1):
+        pygame.draw.circle(surf, (255, 230, 30), (cx + side * 4, cy - 1), 4)
+        pygame.draw.circle(surf, (0, 0, 0), (cx + side * 4, cy - 1), 2)
+    pygame.draw.arc(surf, (40, 10, 0), pygame.Rect(cx - 4, cy + 3, 8, 5),
+                    math.pi + 0.4, 2 * math.pi - 0.4, 1)
+
+
+def _draw_mini_watergirl(surf, x, y, tick):
+    """Small Watergirl preview for the title screen."""
+    cx, cy = x + 14, y + 14
+    wobble = math.sin(tick * 0.1) * 1
+    pygame.draw.circle(surf, (10, 40, 100), (cx + 1, cy - 12 + int(wobble)), 7)
+    pygame.draw.circle(surf, (100, 200, 255), (cx + 1, cy - 12 + int(wobble)), 5)
+    pygame.draw.circle(surf, (10, 40, 100), (cx, cy), 11)
+    pygame.draw.circle(surf, (80, 180, 255), (cx, cy), 9)
+    for side in (-1, 1):
+        pygame.draw.circle(surf, (255, 255, 255), (cx + side * 4, cy - 1), 4)
+        pygame.draw.circle(surf, (0, 0, 0), (cx + side * 4, cy), 2)
+        lid = [(cx + side * 4 - 4, cy - 2), (cx + side * 4, cy - 5), (cx + side * 4 + 4, cy - 2)]
+        pygame.draw.polygon(surf, (80, 180, 255), lid)
+    pygame.draw.arc(surf, (10, 40, 100), pygame.Rect(cx - 4, cy + 3, 8, 5),
+                    math.pi + 0.4, 2 * math.pi - 0.4, 1)
+
+
+def instructions_screen():
+    """
+    Full-screen instructions page.  Returns when the player clicks Back.
+    """
+    bg = Background()
+    back_btn = Button(WIDTH // 2 - 100, HEIGHT - 80, 200, 45,
+                      "Back", (80, 60, 40), (140, 100, 60))
+
+    instructions = [
+        ("GOAL",    "Both characters must reach their exit doors at the same time!"),
+        ("",        ""),
+        ("FIREBOY", "Arrow Keys  —  LEFT / RIGHT to move,  UP to jump"),
+        ("",        "Collects fire (orange) and green jewels"),
+        ("",        "Safe on lava,  dies on water"),
+        ("",        ""),
+        ("WATERGIRL", "W A S D  —  A / D to move,  W to jump"),
+        ("",          "Collects water (blue) and green jewels"),
+        ("",          "Safe on water,  dies on lava"),
+        ("",        ""),
+        ("RESTART",  "Press  R  at any time to restart the level"),
+    ]
+
+    while True:
+        clock.tick(FPS)
+        mouse = pygame.mouse.get_pos()
+
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                pygame.quit()
+                sys.exit()
+            if back_btn.clicked(event):
+                return
+            if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
+                return
+
+        back_btn.update(mouse)
+        bg.update()
+        bg.draw(screen)
+
+        header = font_title.render("How to Play", True, (255, 220, 140))
+        screen.blit(header, (WIDTH // 2 - header.get_width() // 2, 40))
+
+        y = 120
+        for label, desc in instructions:
+            if label == "" and desc == "":
+                y += 12
+                continue
+            if label:
+                lbl = font_menu.render(label, True, (255, 180, 80) if label == "FIREBOY"
+                                       else (80, 200, 255) if label == "WATERGIRL"
+                                       else (255, 220, 140))
+                screen.blit(lbl, (120, y))
+                y += 30
+            if desc:
+                dtxt = font_small.render(desc, True, (200, 195, 185))
+                screen.blit(dtxt, (140, y))
+                y += 28
+
+        back_btn.draw(screen)
+        pygame.display.flip()
+
+
+def best_times_screen():
+    """Full-screen leaderboard showing saved run records (score + time)."""
+    bg = Background()
+    back_btn = Button(WIDTH // 2 - 100, HEIGHT - 80, 200, 45,
+                      "Back", (80, 60, 40), (140, 100, 60))
+
+    while True:
+        clock.tick(FPS)
+        mouse = pygame.mouse.get_pos()
+        records = load_records()
+
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                pygame.quit()
+                sys.exit()
+            if back_btn.clicked(event):
+                return
+            if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
+                return
+
+        back_btn.update(mouse)
+        bg.update()
+        bg.draw(screen)
+
+        header = font_title.render("Leaderboard", True, (255, 220, 140))
+        screen.blit(header, (WIDTH // 2 - header.get_width() // 2, 50))
+
+        sub = font_small.render("Ranked by diamonds (green = 2x),  ties broken by time",
+                                True, (160, 155, 145))
+        screen.blit(sub, (WIDTH // 2 - sub.get_width() // 2, 108))
+
+        if not records:
+            empty = font_menu.render("No runs recorded yet — go play!", True, (180, 175, 165))
+            screen.blit(empty, (WIDTH // 2 - empty.get_width() // 2, 200))
+        else:
+            col_hdr = font_small.render("  #       SCORE          TIME", True, (140, 135, 125))
+            screen.blit(col_hdr, (WIDTH // 2 - 110, 140))
+
+            for i, rec in enumerate(records):
+                rank_color = ((255, 215, 0) if i == 0
+                              else (200, 200, 210) if i == 1
+                              else (180, 120, 60) if i == 2
+                              else (180, 175, 165))
+                row_txt = font_menu.render(
+                    f"#{i + 1:>2}       {rec['score']:>3} pts       {format_time(rec['time'])}",
+                    True, rank_color)
+                surf_y = 170 + i * 36
+                screen.blit(row_txt, (WIDTH // 2 - 110, surf_y))
+
+        back_btn.draw(screen)
+        pygame.display.flip()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -985,9 +1389,15 @@ def main():
     fireboy   = Fireboy  (80,  500)
     watergirl = Watergirl(780, 500)
 
-    game_over = False
-    winner    = False
-    dead_msg  = ""
+    game_over   = False
+    winner      = False
+    dead_msg    = ""
+    start_tick  = pygame.time.get_ticks()
+    elapsed     = 0.0
+    final_time  = 0.0
+    final_score = 0
+    new_high    = False
+    records     = load_records()
 
     while True:
         clock.tick(FPS)
@@ -1004,6 +1414,7 @@ def main():
 
         # ── Update (only when game is still active) ───────────────────────────
         if not game_over and not winner:
+            elapsed = (pygame.time.get_ticks() - start_tick) / 1000.0
             keys = pygame.key.get_pressed()
 
             # Fireboy — arrow keys
@@ -1059,6 +1470,12 @@ def main():
             # Win when both characters are at their respective doors
             if fire_door.active and water_door.active:
                 winner = True
+                final_time = elapsed
+                final_score = fireboy.score + watergirl.score
+                new_high = is_new_high(final_score, final_time, records)
+                records.append({"score": final_score, "time": final_time})
+                records = sorted(records, key=_rank_key)[:MAX_RECORDS]
+                save_records(records)
 
         # ── Draw ─────────────────────────────────────────────────────────────
         bg.draw(screen)
@@ -1070,15 +1487,16 @@ def main():
             j.draw(screen)
         fireboy.draw  (screen)
         watergirl.draw(screen)
-        draw_hud(screen, fireboy, watergirl)
+        draw_hud(screen, fireboy, watergirl, elapsed if not winner else final_time)
 
         if game_over:
             draw_death_screen(screen, dead_msg)
         if winner:
-            draw_win_screen(screen)
+            draw_win_screen(screen, final_score, final_time, records, new_high)
 
         pygame.display.flip()
 
 
 if __name__ == "__main__":
+    start_screen()
     main()
